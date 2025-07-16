@@ -12,7 +12,7 @@ const async_handler = (fn) => async (req, res, next) => {
 */ 
 
 const async_handler = (request_handler) => {                                        // async_handler takes a func and returns a new func
-   (req, res, next) => {                                                            // this new function that takes req, res, next callbacks
+   return (req, res, next) => {                                                            // this new function that takes req, res, next callbacks
       Promise.resolve(request_handler(req, res, next)).catch((err) => next(err))    // Executes the request_handler and catches any errors, passing them to next
    }
 }
