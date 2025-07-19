@@ -24,7 +24,6 @@ const userschema = new Schema({
       type: String,
       required: true,
       length: 20,
-      lowercase: true,
       trim: true
    },
    avatar: {
