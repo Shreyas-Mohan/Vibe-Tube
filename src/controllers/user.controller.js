@@ -4,17 +4,7 @@ import {user} from '../models/user.model.js'
 import { uploadOnCloudinary } from '../utils/cloudinary.js'
 import { ApiResponse } from '../utils/api-response.js'
 import jwt from 'jsonwebtoken'
-/*
-get user res from frontend
-validation -not empty
-check if user already exists
-check for images, check for avatar
-upload them to cloudinary, avatar
-create user object - create entry in db
-remove pass and refresh token field from res
-check for user creation
-return res
-*/
+import mongoose from 'mongoose'
 
 const registeruser = async_handler(async (req, res)=>{
    const {fullname, email, username, password} = req.body
@@ -66,7 +56,7 @@ const registeruser = async_handler(async (req, res)=>{
    }
    
    return res.status(201).json(
-      new ApiResponse(200, created_user, 'user registered successfully.')
+      new ApiResponse(201, created_user, 'user registered successfully.')
    )
 })
 
@@ -87,6 +77,9 @@ const loginuser = async_handler(async (req, res)=>{
    const {email, username, password} = req.body
    if(!(username || email)){
       throw new ApiError(400, 'Username or email is required.')
+   }
+   if(!password){
+      throw new ApiError(400, 'Password is required.')
    }
    const User = await user.findOne({$or: [{username}, {email}]})
    if (!User){
@@ -140,12 +133,12 @@ const refreshAccessToken = async_handler(async(req,res)=>{
          throw new ApiError(401, 'invalid refresh token')
       }
       const options = {httpOnly: true, secure: true}
-      const {accessToken, newRefreshToken} = await generateAccessAndRefreshToken(user._id)
+      const {accessToken, newRefreshToken} = await generateAccessAndRefreshToken(User._id)
       return res
       .status(200)
       .cookie('accessToken', accessToken, options)
       .cookie('refreshToken', newRefreshToken, options)
-      .json(new ApiResponse(200, {accessToken, newRefreshToken}, 'access token refreshed'))
+      .json(new ApiResponse(200, {accessToken, refreshToken: newRefreshToken}, 'access token refreshed'))
    } catch (error) {
       throw new ApiError(401, error?.message || 'invalid refresh token')
    }
@@ -153,18 +146,28 @@ const refreshAccessToken = async_handler(async(req,res)=>{
 
 const changeCurrentPassword = async_handler(async(req, res)=>{
    const {oldPass, newPass, confPass} = req.body
-   if(!(newPass===confPass)){
+   
+   if(!oldPass || !newPass || !confPass) {
+      throw new ApiError(400, 'All password fields are required')
+   }
+   
+   if(newPass.length < 6) {
+      throw new ApiError(400, 'New password must be at least 6 characters long')
+   }
+   
+   if(!(newPass === confPass)){
       throw new ApiError(400, 'password does not match')
    }
+   
    const User = await user.findById(req.User?._id)
-   const isPassCorrect = User.isPasswordCorrect(oldPass)
+   const isPassCorrect = await User.isPasswordCorrect(oldPass)
    if(!isPassCorrect){
-      throw new ApiError(400, 'paassword is not corect')
+      throw new ApiError(400, 'password is not correct')
    }
+   
    User.password = newPass
    await User.save({validateBeforeSave: false})
    return res.status(200).json(new ApiResponse(200, {}, 'Password changed successfully.'))
-   
 })
 
 const getCurrentUser = async_handler(async (req, res)=>{
@@ -174,9 +177,9 @@ const getCurrentUser = async_handler(async (req, res)=>{
 const updateAccount = async_handler(async(req, res)=>{
    const {fullname, email} = req.body
    if(!fullname || !email){
-      throw new ApiError('all fields are required')
+      throw new ApiError(400, 'all fields are required')
    }
-   const User = user.findByIdAndUpdate(
+   const User = await user.findByIdAndUpdate(
       req.User?._id, 
       {$set:{fullname, email}}, 
       {new: true}
@@ -189,31 +192,122 @@ const updateAvatar = async_handler(async (req, res)=>{
    if(!avatarLocalPath){
       throw new ApiError(400, 'avatar file is missing')
    }
+   
    const avatar = await uploadOnCloudinary(avatarLocalPath)
    if(!avatar){
       throw new ApiError(400, 'error while uploading avatar')
    }
+   
    const User = await user.findByIdAndUpdate(
       req.User?._id, 
       {$set: {avatar: avatar.url}}, 
       {new: true}).select('-password')
-      return res.status(200).json(new ApiResponse(200, User, 'avatar updated sucessfully'))
+      
+   return res.status(200).json(new ApiResponse(200, User, 'avatar updated successfully'))
 })
 
 const updateCover = async_handler(async (req, res)=>{
    const cvimgLocalPath = req.file?.path
-   if(!avatarLocalPath){
-      throw new ApiError(400, 'avatar file is missing')
+   if(!cvimgLocalPath){
+      throw new ApiError(400, 'cover image file is missing')
    }
+   
    const coverimage = await uploadOnCloudinary(cvimgLocalPath)
    if(!coverimage){
       throw new ApiError(400, 'error while uploading cover image')
    }
+   
    const User = await user.findByIdAndUpdate(
       req.User?._id, 
       {$set: {coverimage: coverimage.url}}, 
       {new: true}).select('-password')
-      return res.status(200).json(new ApiResponse(200, User, 'Cover Image updated sucessfully'))
+      
+   return res.status(200).json(new ApiResponse(200, User, 'Cover Image updated successfully'))
 })
 
-export {registeruser, loginuser, logoutUser, refreshAccessToken, changeCurrentPassword, getCurrentUser, updateAccount, updateAvatar, updateCover}
+const getUserChannelprofile = async_handler(async (req, res)=>{
+   const {username} = req.params
+   if(!username?.trim()){
+      throw new ApiError(400, 'username is missing')
+   }
+   const channel = await user.aggregate([
+      {
+         $match:{username: username?.toLowerCase()}
+      },
+      {
+         $lookup:{
+            from: 'subscriptions',
+            localField: '_id',
+            foreignField: 'channel',
+            as: 'subscribers'
+         }
+      },
+      {
+         $lookup:{
+            from: 'subscriptions',
+            localField: '_id',
+            foreignField: 'subscriber',
+            as: 'subscribedTo'
+         }
+      },
+      {
+         $addFields:{
+            subscribersCount: {$size: '$subscribers'},
+            channelsSubscribedToCount: {$size: '$subscribedTo'},
+            isSubscribed: {
+               $cond: {
+                  if: {$in : [req.User?._id, '$subscribers.subscriber']},
+                  then: true,
+                  else: false 
+            }
+            }
+         }
+      },
+      {
+         $project: {fullname:1, username:1, subscribersCount: 1, channelsSubscribedToCount: 1, isSubscribed: 1, avatar: 1, email: 1, coverimage: 1}
+      }
+   ])
+   if(!channel?.length){
+      throw new ApiError(404, 'channel does not exist')
+   }
+   return res.status(200).json(new ApiResponse(200, channel[0], 'user channel fetched successfully'))
+})
+
+const getWatchHistory = async_handler(async (req, res)=>{
+   const User = await user.aggregate([
+      {
+         $match:{_id: mongoose.Types.ObjectId.createFromHexString(req.User._id.toString())}
+      },
+      {
+         $lookup:{
+            from: 'videos',
+            localField: 'watchHistory',
+            foreignField: '_id',
+            as: 'watchHistory',
+            pipeline:[
+               {
+                  $lookup: {
+                     from: 'users',
+                     localField: 'owner',
+                     foreignField: '_id',
+                     as: 'owner',
+                     pipeline: [{$project: {fullname: 1, username: 1, avatar: 1}}]
+                  }
+               },
+               {
+                  $addFields:{
+                     owner: {$first: '$owner'}
+                  }
+               }
+            ]
+         }
+      }
+   ])
+   
+   if(!User || User.length === 0) {
+      return res.status(200).json(new ApiResponse(200, [], 'No watch history found'))
+   }
+   return res.status(200).json(new ApiResponse(200, User[0].watchHistory, 'watch history fetched successfully'))
+})
+
+export {registeruser, loginuser, logoutUser, refreshAccessToken, changeCurrentPassword, getCurrentUser, updateAccount, updateAvatar, updateCover, getUserChannelprofile, getWatchHistory}
